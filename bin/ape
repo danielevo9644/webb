@@ -1,0 +1,99 @@
+#!/usr/bin/env node
+var ape = require('../lib/ape'),
+    fs = require('fs'),
+    path = require('path'),
+    async = require('async'),
+    walk = require('walk'),
+    argv = require('optimist')
+        .usage('Usage: $0 [input file|directory list]')
+        .boolean(['md', 'html'])
+        .string(['output', 'template'])
+        .describe({ md: 'Output as markdown', html: 'Output as HTML', template: 'Template for HTML output', output: 'Output directory' })
+        .alias({ template: 't', input: 'i', output: 'o' })
+        .default({ md: true, html: false })
+        .check(function (args) { 
+            if (args.html) args.md = false;
+            if (args._.length === 0) throw 'Input not specified';
+            if (args.o && !fs.existsSync(args.o)) throw 'Output directory does not exist';
+            if (args.t) {
+                if (path.extname(args.t) !== '.jade') throw 'Template file must be jade';
+                if (!fs.existsSync(args.t)) throw 'Template file does not exist';
+            }
+        })
+        .argv;
+
+var outPath = argv.o,
+    template = argv.t,
+    outFmt;
+
+argv.md ? outFmt = 'md' : outFmt = 'html';
+
+function process_item(name, callback) {
+    fs.stat(name, function (err, stats) {
+        if (err) {
+            callback(new Error('error opening ' + name));
+        } else {
+            if (stats.isFile()) {
+                ape.supported(name, function (supported) {
+                    if (supported) {
+                        console.log('processing', name);
+                        fs.readFile(name, function (err, file_contents) {
+                            var lang = ape.get_language(name),
+                                code = (file_contents||"").toString();
+                            ape.generate_doc(code, lang, outFmt, template, function (err, output) {
+                                fs.writeFile(get_output_path(outPath, name, outFmt), output, function (err) {
+                                    if (err) console.log(err);
+                                    callback();
+                                });
+                            });
+                        });
+                    } else {
+                        console.log('skipping unsupported file', name);
+                    }
+                });
+            } else if (stats.isDirectory()) {
+                var walker = walk.walk(name);
+                walker.on('file', function (root, fileStats, next) {
+                    var file = path.join(root, fileStats.name);
+                    ape.supported(file, function (supported) {
+                        if (supported) {
+                            console.log('processing', file);
+                            fs.readFile(file, function (err, file_contents) {
+                                var lang = ape.get_language(file),
+                                    code = (file_contents||"").toString();
+                                ape.generate_doc(code, lang, outFmt, template, function (err, output) {
+                                    fs.writeFile(get_output_path(outPath, file, outFmt), output, function (err) {
+                                        if (err) console.log(err);
+                                        next();
+                                    });
+                                });
+                            });
+                        } else {
+                            console.log('skipping unsupported file', file);
+                            next();
+                        }
+                    });
+                });
+                walker.on('end', function () {
+                    callback();
+                });
+            }
+        }
+    });
+}
+
+function get_output_path(dirname, filename, format) {
+    if (typeof dirname === 'undefined') {
+        outfile = filename.replace(path.extname(filename), '.'+format);
+    } else {
+        outfile = path.join(dirname, path.basename(filename).replace(path.extname(filename), '.'+format));
+    }
+    return outfile;
+}
+
+async.mapSeries(argv._, process_item, function (err) {
+    if (err) {
+        console.log(err);
+        process.exit(1);
+    }
+});
